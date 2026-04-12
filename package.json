@@ -1,0 +1,18 @@
+{
+  "name": "trader-bot",
+  "version": "1.0.0",
+  "description": "Claude-powered multi-model trade signal analyzer",
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file=.env src/index.js",
+    "watch": "node --env-file=.env src/watch.js",
+    "webhook": "node --env-file=.env src/webhook.js",
+    "journal": "node --env-file=.env src/journal.js",
+    "setup": "npm install && npx playwright install chromium"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.0",
+    "@google/generative-ai": "^0.21.0",
+    "playwright": "^1.44.0"
+  }
+}
