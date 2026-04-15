@@ -174,6 +174,7 @@ export class PositionMonitor {
     if (!Array.isArray(positions) || positions.length === 0) {
       // Clean up closed positions from our map
       this._trailed.clear();
+      console.log(`[Monitor] No open positions — ${new Date().toLocaleTimeString("en-PH", { timeZone: "Asia/Manila" })} PH`);
       return;
     }
 

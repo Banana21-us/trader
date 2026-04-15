@@ -26,7 +26,17 @@ export class TelegramAlerter {
 
     if (!this.enabled) {
       console.warn("[Telegram] Disabled — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.");
+    } else {
+      this.sendText("✅ Trader bot connected! You will receive trade signals here.");
     }
+  }
+
+  // ─── TEST CONNECTION ───────────────────────────────────────────────────────
+
+  async testConnection() {
+    if (!this.enabled) return false;
+    const res = await this.sendText("🧪 Test message — bot is working!");
+    return res?.ok;
   }
 
   // ─── SEND SIGNAL WITH BUTTONS ────────────────────────────────────────────

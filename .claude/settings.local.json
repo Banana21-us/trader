@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(find \"D:\\\\\\\\XAUUSD_BOT\" -type f -name \"*.py\")",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(npm run:*)"
     ]
   }
 }

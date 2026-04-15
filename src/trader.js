@@ -12,8 +12,11 @@ import { Logger } from "./utils/logger.js";
 
 // Provider selection
 const USE_FREE_MODEL = process.env.USE_FREE_MODEL === "true";
+const USE_OLLAMA = process.env.USE_OLLAMA === "true";
 const ANALYSIS_MODEL = process.env.ANALYSIS_MODEL || "claude-opus-4-5";
 const GEMINI_MODEL   = process.env.GEMINI_MODEL   || "gemini-1.5-flash";
+const OLLAMA_MODEL   = process.env.OLLAMA_MODEL   || "kimi-k2.5:cloud";
+const OLLAMA_API_URL = process.env.OLLAMA_API_URL || "http://localhost:11434";
 
 const claudeClient = new Anthropic();
 const geminiClient = USE_FREE_MODEL && process.env.GEMINI_API_KEY
@@ -39,7 +42,7 @@ export class TraderBot {
       momentum: new MomentumModel(),
     };
 
-    const provider = USE_FREE_MODEL ? `Gemini (${GEMINI_MODEL}) [FREE]` : `Claude (${ANALYSIS_MODEL})`;
+    const provider = USE_OLLAMA ? `Ollama (${OLLAMA_MODEL})` : USE_FREE_MODEL ? `Gemini (${GEMINI_MODEL}) [FREE]` : `Claude (${ANALYSIS_MODEL})`;
     this.logger.info(`TraderBot initialized — provider: ${provider}`);
   }
 
@@ -56,7 +59,9 @@ export class TraderBot {
     this.logger.info(`Analyzing ${params.asset} | Session: ${params.session}`);
 
     let signal;
-    if (USE_FREE_MODEL) {
+    if (USE_OLLAMA) {
+      signal = await this.runOllamaAnalysis(params);
+    } else if (USE_FREE_MODEL) {
       signal = await this.runGeminiAnalysis(params);
     } else {
       const contentBlocks = this.buildClaudeContentBlocks(params);
@@ -210,5 +215,39 @@ export class TraderBot {
       conf >= this.config.minConfidence &&
       rr   >= this.config.minRR
     );
+  }
+
+  // ── OLLAMA ANALYSIS ─────────────────────────────────────────────────────────
+
+  async runOllamaAnalysis({ charts, asset, session, news, balance, riskPct }) {
+    const prompt = `${buildTraderSystemPrompt()}\n\n${buildAnalysisPrompt({
+      asset, session, news, balance, riskPct,
+      hasCharts: charts.daily || charts.m15 || charts.m5,
+    })}`;
+
+    // Send request to Ollama API
+    const response = await fetch(`${OLLAMA_API_URL}/api/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        prompt: prompt,
+        stream: false,
+        options: {
+          temperature: 0.2,
+          top_p: 0.9,
+          top_k: 40
+        }
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return this.parseJSON(data.response);
   }
 }

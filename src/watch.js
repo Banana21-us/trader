@@ -58,6 +58,8 @@ const broker       = new BrokerExecutor();
 const chartCapture = new ChartCapture();
 const monitor      = new PositionMonitor({ bridgeUrl, bridgeSecret, telegram });
 
+// telegram.testConnection(); // disabled — silent auto-execute mode
+
 // ── LIVE BALANCE READER ───────────────────────────────────────────────────────
 
 async function getLiveBalance() {
@@ -159,15 +161,11 @@ async function scanAsset(asset, balance, sessionName) {
   }
 
   if (autoExecute) {
-    await telegram.sendSignal(signal);
     const result = await broker.execute(signal);
     if (result.success) {
-      await telegram.sendText(
-        `✅ *Auto-executed* — ${asset} ${signal.verdict} @ \`${signal.entry}\`\n` +
-        `Order: \`${result.orderId}\` | Risk: $${signal.meta.riskAmount}`
-      );
+      console.log(`[Watch] ✅ Auto-executed — ${asset} ${signal.verdict} @ ${signal.entry} | Order: ${result.orderId} | Risk: $${signal.meta.riskAmount}`);
     } else if (!result.skipped) {
-      await telegram.sendText(`❌ Auto-execute failed: ${result.error}`);
+      console.log(`[Watch] ❌ Auto-execute failed: ${result.error}`);
     }
   } else {
     await telegram.sendSignal(signal, { onExecute: executeSignal, onSkip: skipSignal });
@@ -255,8 +253,8 @@ console.log(`
   Waiting for next session window...
 `);
 
-// Start Telegram button listener
-telegram.startCallbackListener();
+// Telegram button listener disabled — silent auto-execute mode
+// telegram.startCallbackListener();
 
 // Position monitor — every 60s, trails stops on open MT5 positions
 if (usingMT5) {

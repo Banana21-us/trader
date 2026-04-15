@@ -38,6 +38,8 @@ const telegram = new TelegramAlerter();
 const broker   = new BrokerExecutor();
 const newsFetcher = new NewsFetcher();
 
+telegram.testConnection();
+
 // ─── EXECUTION CALLBACKS ──────────────────────────────────────────────────────
 
 async function executeSignal(signal) {
