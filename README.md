@@ -96,3 +96,4 @@ ASSET=               Default asset (XAUUSD)
 BALANCE=             Default balance (1000)
 RISK_PCT=            Default risk % (2)
 ```
+"# trader" 
