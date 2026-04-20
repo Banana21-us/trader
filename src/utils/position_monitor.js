@@ -11,11 +11,9 @@
  */
 
 export class PositionMonitor {
-  constructor({ bridgeUrl, bridgeSecret, telegram }) {
+  constructor({ bridgeUrl, bridgeSecret }) {
     this.bridgeUrl    = bridgeUrl;
     this.bridgeSecret = bridgeSecret;
-    this.telegram     = telegram;
-    // Track which tickets we've already trailed so we don't spam Telegram
     this._trailed = new Map(); // ticket → last trail level ("be" | "1r")
   }
 
@@ -60,13 +58,6 @@ export class PositionMonitor {
 
       if (lossPct >= maxDailyLossPct) {
         console.warn(`[Monitor] ⛔ Daily loss limit hit: -${lossPct.toFixed(1)}% (limit ${maxDailyLossPct}%)`);
-        if (this.telegram?.enabled) {
-          await this.telegram.sendText(
-            `⛔ *Daily loss limit reached!*\n` +
-            `-${lossPct.toFixed(1)}% drawdown today.\n` +
-            `Bot paused — no new trades until tomorrow.`
-          );
-        }
         return true; // caller should skip new trades
       }
     } catch {}
@@ -99,11 +90,6 @@ export class PositionMonitor {
           if (res.success) {
             this._trailed.set(ticket, "2r");
             console.log(`[Monitor] 🔒 ${symbol} BUY #${ticket} — SL locked at +1R (${newSL.toFixed(2)})`);
-            await this.telegram?.sendText(
-              `🔒 *Trailing stop updated*\n` +
-              `${symbol} BUY — profit reached 2R\n` +
-              `SL moved to *+1R* at \`${newSL.toFixed(2)}\` (profit locked)`
-            );
           }
         }
       } else if (is1R && lastLevel === "none") {
@@ -114,11 +100,6 @@ export class PositionMonitor {
           if (res.success) {
             this._trailed.set(ticket, "1r");
             console.log(`[Monitor] 🔒 ${symbol} BUY #${ticket} — SL moved to breakeven (${newSL.toFixed(2)})`);
-            await this.telegram?.sendText(
-              `🔒 *Trailing stop updated*\n` +
-              `${symbol} BUY — profit reached 1R\n` +
-              `SL moved to *breakeven* at \`${newSL.toFixed(2)}\` (no loss possible)`
-            );
           }
         }
       }
@@ -135,11 +116,6 @@ export class PositionMonitor {
           if (res.success) {
             this._trailed.set(ticket, "2r");
             console.log(`[Monitor] 🔒 ${symbol} SELL #${ticket} — SL locked at +1R (${newSL.toFixed(2)})`);
-            await this.telegram?.sendText(
-              `🔒 *Trailing stop updated*\n` +
-              `${symbol} SELL — profit reached 2R\n` +
-              `SL moved to *+1R* at \`${newSL.toFixed(2)}\` (profit locked)`
-            );
           }
         }
       } else if (is1R && lastLevel === "none") {
@@ -149,11 +125,6 @@ export class PositionMonitor {
           if (res.success) {
             this._trailed.set(ticket, "1r");
             console.log(`[Monitor] 🔒 ${symbol} SELL #${ticket} — SL moved to breakeven (${newSL.toFixed(2)})`);
-            await this.telegram?.sendText(
-              `🔒 *Trailing stop updated*\n` +
-              `${symbol} SELL — profit reached 1R\n` +
-              `SL moved to *breakeven* at \`${newSL.toFixed(2)}\` (no loss possible)`
-            );
           }
         }
       }

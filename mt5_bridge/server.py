@@ -179,6 +179,32 @@ def positions():
     } for p in pos])
 
 
+@app.route("/price/<symbol>")
+def price(symbol):
+    err = check_auth()
+    if err: return err
+    if not ensure_connected():
+        return jsonify({"error": "MT5 not connected"}), 503
+
+    symbol = symbol.replace("/", "").upper()
+    sym = mt5.symbol_info(symbol)
+    if not sym:
+        return jsonify({"error": f"Symbol {symbol} not found"}), 404
+    if not sym.visible:
+        mt5.symbol_select(symbol, True)
+
+    tick = mt5.symbol_info_tick(symbol)
+    if not tick:
+        return jsonify({"error": "No tick data"}), 500
+
+    return jsonify({
+        "symbol": symbol,
+        "bid":    tick.bid,
+        "ask":    tick.ask,
+        "time":   tick.time,
+    })
+
+
 @app.route("/execute", methods=["POST"])
 def execute():
     err = check_auth()
@@ -221,28 +247,45 @@ def execute():
     # Calculate lot size from risk amount
     lot = calc_lot(symbol, price, sl_price, risk_usd) if sl_price else sym.volume_min
 
-    req = {
-        "action":       mt5.TRADE_ACTION_DEAL,
-        "symbol":       symbol,
-        "volume":       lot,
-        "type":         order_type,
-        "price":        price,
-        "sl":           sl_price if sl_price else 0.0,
-        "tp":           tp_price if tp_price else 0.0,
-        "deviation":    20,
-        "magic":        234001,
-        "comment":      comment,
-        "type_time":    mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
-    }
+# Try different filling modes - demo accounts often only support RETURN
+    filling_modes = [
+        mt5.ORDER_FILLING_RETURN,  # Most compatible - allows partial fills
+        mt5.ORDER_FILLING_IOC,  # Immediate or Cancel
+        mt5.ORDER_FILLING_FOK,  # Fill or Kill
+    ]
 
-    result = mt5.order_send(req)
+    result = None
+    last_error = None
+
+    for filling_mode in filling_modes:
+        req = {
+            "action":       mt5.TRADE_ACTION_DEAL,
+            "symbol":       symbol,
+            "volume":       lot,
+            "type":         order_type,
+            "price":        price,
+            "sl":           sl_price if sl_price else 0.0,
+            "tp":           tp_price if tp_price else 0.0,
+            "deviation":   20,
+            "magic":        234001,
+            "comment":     comment,
+            "type_time":   mt5.ORDER_TIME_GTC,
+            "type_filling": filling_mode,
+        }
+
+        result = mt5.order_send(req)
+        if result.retcode == mt5.TRADE_RETCODE_DONE:
+            break
+        last_error = f"{result.comment} (retcode {result.retcode})"
+        print(f"[MT5] Filling mode {filling_mode} failed, trying next...")
 
     if result.retcode != mt5.TRADE_RETCODE_DONE:
-        msg = f"{result.comment} (retcode {result.retcode})"
+        msg = last_error
         if result.retcode == 10027: msg += " — Enable AutoTrading in MT5"
         if result.retcode == 10018: msg += " — No connection to trade server"
         if result.retcode == 10014: msg += " — Invalid price, requote"
+        if result.retcode == 10016: msg += f" — SL/TP invalid: for BUY, SL must be below {price:.5f} and TP above it; for SELL, reversed"
+        if result.retcode == 10030: msg += " — Broker doesn't support order type"
         print(f"[MT5] Order FAILED: {msg}")
         return jsonify({"error": msg, "retcode": result.retcode}), 400
 
@@ -274,21 +317,35 @@ def close_position(ticket):
     close_price = tick.bid if p.type == 0 else tick.ask
     close_type  = mt5.ORDER_TYPE_SELL if p.type == 0 else mt5.ORDER_TYPE_BUY
 
-    req = {
-        "action":       mt5.TRADE_ACTION_DEAL,
-        "symbol":       p.symbol,
-        "volume":       p.volume,
-        "type":         close_type,
-        "position":     ticket,
-        "price":        close_price,
-        "deviation":    20,
-        "magic":        234001,
-        "comment":      "TraderBot close",
-        "type_time":    mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
-    }
+    # Try different filling modes for close operations
+    filling_modes = [
+        mt5.ORDER_FILLING_RETURN,
+        mt5.ORDER_FILLING_IOC,
+        mt5.ORDER_FILLING_FOK,
+    ]
 
-    result = mt5.order_send(req)
+    result = None
+    last_error = None
+
+    for filling_mode in filling_modes:
+        req = {
+            "action":       mt5.TRADE_ACTION_DEAL,
+            "symbol":       p.symbol,
+            "volume":       p.volume,
+            "type":         close_type,
+            "position":     ticket,
+            "price":        close_price,
+            "deviation":    20,
+            "magic":        234001,
+            "comment":      "TraderBot close",
+            "type_time":    mt5.ORDER_TIME_GTC,
+            "type_filling": filling_mode,
+        }
+
+        result = mt5.order_send(req)
+        if result.retcode == mt5.TRADE_RETCODE_DONE:
+            break
+        last_error = f"{result.comment} (retcode {result.retcode})"
     if result.retcode != mt5.TRADE_RETCODE_DONE:
         return jsonify({"error": result.comment, "retcode": result.retcode}), 400
 

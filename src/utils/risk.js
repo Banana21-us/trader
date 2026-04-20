@@ -1,4 +1,11 @@
 export class RiskEngine {
+  constructor() {
+    // Track trade history for drawdown calculation
+    this.tradeHistory = [];
+    // Track current position sizes for position limits
+    this.currentPositions = new Map();
+  }
+
   enrich(signal, { balance, riskPct, asset }) {
     const riskAmount = balance * (riskPct / 100);
 
@@ -29,6 +36,21 @@ export class RiskEngine {
 
     const grade = this.gradeSignal(signal);
 
+    // Apply position sizing limits and drawdown controls
+    const { adjustedPositionSize, positionLimitReason } = this.applyPositionLimits(
+      signal, 
+      positionSize, 
+      riskAmount, 
+      balance,
+      asset
+    );
+
+    const { maxDrawdownAllowed, drawdownLimitReason } = this.checkDrawdownLimits(
+      signal,
+      balance,
+      this.tradeHistory
+    );
+
     return {
       ...signal,
       meta: {
@@ -37,7 +59,8 @@ export class RiskEngine {
         riskPct,
         riskAmount:  parseFloat(riskAmount.toFixed(2)),
         maxReward:   parseFloat(maxReward.toFixed(2)),
-        positionSize,
+        positionSize: adjustedPositionSize,
+        originalPositionSize: positionSize,
         pipRisk:     pipRisk ? parseFloat(pipRisk.toFixed(5)) : null,
         rrTp1,
         rrTp2,
@@ -48,6 +71,12 @@ export class RiskEngine {
         isTradeworthy: this.isTradeworthy(signal),
         // Partial close amounts
         partialAmounts: this.calcPartialAmounts(riskAmount, rrTp1, rrTp2, rrTp3, grade),
+        // Risk management metadata
+        maxDrawdownAllowed,
+        positionLimitReason,
+        drawdownLimitReason,
+        // Track position for future calculations
+        assetPosition: this.currentPositions.get(asset) || 0,
       },
     };
   }
@@ -165,6 +194,12 @@ ${arrow} VERDICT:      ${verdict} (${enriched.confidence}% confidence) [${gradeS
   Balance:      $${(meta.balance || 0).toLocaleString()}
   Risk:         ${meta.riskPct}% = $${meta.riskAmount}${meta.positionSize ? `  (${meta.positionSize} units)` : ""}
   Max Reward:   $${meta.maxReward} (to TP2)
+  Position Size: ${meta.positionSize || 0} units${meta.originalPositionSize && meta.originalPositionSize !== meta.positionSize ? ` (adjusted from ${meta.originalPositionSize})` : ''}
+
+─── RISK MANAGEMENT ────────────────────────────────
+  Max Drawdown Allowed: ${meta.maxDrawdownAllowed !== null ? `${meta.maxDrawdownAllowed}%` : 'Not set'}
+  Position Limit Reason: ${meta.positionLimitReason || 'None'}
+  Drawdown Limit Reason: ${meta.drawdownLimitReason || 'None'}
 
 ─── KEY LEVELS ─────────────────────────────────────
   ${enriched.key_levels || ""}
@@ -180,5 +215,160 @@ ${arrow} VERDICT:      ${verdict} (${enriched.confidence}% confidence) [${gradeS
   Time:      ${meta.timestamp}
 ${"═".repeat(50)}
 `;
+  }
+
+  /**
+   * Apply position sizing limits based on asset and risk parameters
+   */
+  applyPositionLimits(signal, positionSize, riskAmount, balance, asset) {
+    // If no position size can be calculated, return as is
+    if (!positionSize) {
+      return { adjustedPositionSize: positionSize, positionLimitReason: null };
+    }
+
+    const adjustedPositionSize = parseFloat(positionSize);
+    
+    // Configuration for position limits
+    const maxPositionSize = 10000; // Maximum position size for any single asset
+    const maxTotalPosition = balance * 0.3; // Maximum total position value (30% of balance)
+    const maxAssetPosition = balance * 0.1; // Maximum position value per asset (10% of balance)
+    
+    let reason = null;
+
+    // Check if position size exceeds maximum
+    if (adjustedPositionSize > maxPositionSize) {
+      const ratio = maxPositionSize / adjustedPositionSize;
+      const newAdjustedSize = (adjustedPositionSize * ratio).toFixed(4);
+      reason = `Position size reduced from ${adjustedPositionSize} to ${newAdjustedSize} due to maximum limit of ${maxPositionSize}`;
+      return { adjustedPositionSize: newAdjustedSize, positionLimitReason: reason };
+    }
+
+    // Check if total position value exceeds 30% of balance
+    const totalPositionValue = adjustedPositionSize * riskAmount;
+    if (totalPositionValue > maxTotalPosition) {
+      const ratio = maxTotalPosition / totalPositionValue;
+      const newAdjustedSize = (adjustedPositionSize * ratio).toFixed(4);
+      reason = `Position size reduced from ${adjustedPositionSize} to ${newAdjustedSize} due to total position limit of 30% of balance`;
+      return { adjustedPositionSize: newAdjustedSize, positionLimitReason: reason };
+    }
+
+    // Check if position value for this asset exceeds 10% of balance
+    const currentAssetPositionValue = (this.currentPositions.get(asset) || 0) * riskAmount;
+    const newAssetPositionValue = currentAssetPositionValue + (adjustedPositionSize * riskAmount);
+    
+    if (newAssetPositionValue > maxAssetPosition) {
+      const ratio = maxAssetPosition / newAssetPositionValue;
+      const newAdjustedSize = (adjustedPositionSize * ratio).toFixed(4);
+      reason = `Position size reduced from ${adjustedPositionSize} to ${newAdjustedSize} due to asset position limit of 10% of balance`;
+      return { adjustedPositionSize: newAdjustedSize, positionLimitReason: reason };
+    }
+
+    // Update current positions tracking
+    const existingPosition = this.currentPositions.get(asset) || 0;
+    this.currentPositions.set(asset, existingPosition + adjustedPositionSize);
+
+    return { adjustedPositionSize, positionLimitReason: reason };
+  }
+
+  /**
+   * Check if we're within maximum drawdown limits
+   */
+  checkDrawdownLimits(signal, balance, tradeHistory) {
+    // Configuration for drawdown limits
+    const maxDrawdownPercentage = 10; // Maximum 10% drawdown allowed
+    const maxDrawdownAllowed = maxDrawdownPercentage;
+    
+    // If no trade history, no drawdown limit applies
+    if (!tradeHistory || tradeHistory.length === 0) {
+      return { maxDrawdownAllowed, drawdownLimitReason: null };
+    }
+
+    // Calculate current equity based on trade history
+    let currentEquity = balance;
+    let maxEquity = balance;
+    
+    for (const trade of tradeHistory) {
+      if (trade.outcome === "win") {
+        currentEquity += trade.meta.riskAmount;
+      } else if (trade.outcome === "loss") {
+        currentEquity -= trade.meta.riskAmount;
+      }
+      
+      // Track maximum equity for drawdown calculation
+      if (currentEquity > maxEquity) {
+        maxEquity = currentEquity;
+      }
+    }
+    
+    // Calculate drawdown percentage
+    const drawdownPercentage = ((maxEquity - currentEquity) / maxEquity) * 100;
+    
+    let reason = null;
+    
+    if (drawdownPercentage > maxDrawdownPercentage) {
+      reason = `Drawdown limit exceeded: ${drawdownPercentage.toFixed(2)}% > ${maxDrawdownPercentage}%`;
+      return { maxDrawdownAllowed, drawdownLimitReason: reason };
+    }
+
+    return { maxDrawdownAllowed, drawdownLimitReason: reason };
+  }
+
+  /**
+   * Add a trade to history for drawdown tracking
+   */
+  addTradeToHistory(trade) {
+    this.tradeHistory.push(trade);
+  }
+
+  /**
+   * Update the current positions based on trade outcome
+   */
+  updatePositions(trade) {
+    const { meta, verdict, asset } = trade;
+    const position = parseFloat(meta.positionSize || 0);
+    
+    if (verdict === "BUY") {
+      this.currentPositions.set(asset, (this.currentPositions.get(asset) || 0) + position);
+    } else if (verdict === "SELL") {
+      this.currentPositions.set(asset, (this.currentPositions.get(asset) || 0) - position);
+    }
+  }
+
+  /**
+   * Calculate current drawdown based on trade history
+   */
+  getCurrentDrawdown() {
+    if (!this.tradeHistory || this.tradeHistory.length === 0) return 0;
+    
+    let currentEquity = 0;
+    let maxEquity = 0;
+    
+    // Initialize with first trade if available
+    if (this.tradeHistory.length > 0) {
+      currentEquity = this.tradeHistory[0].meta.balance || 0;
+      maxEquity = currentEquity;
+    }
+    
+    for (const trade of this.tradeHistory) {
+      if (trade.outcome === "win") {
+        currentEquity += trade.meta.riskAmount;
+      } else if (trade.outcome === "loss") {
+        currentEquity -= trade.meta.riskAmount;
+      }
+      
+      if (currentEquity > maxEquity) {
+        maxEquity = currentEquity;
+      }
+    }
+    
+    if (maxEquity === 0) return 0;
+    return ((maxEquity - currentEquity) / maxEquity) * 100;
+  }
+
+  /**
+   * Reset current positions for a new trading session
+   */
+  resetPositions() {
+    this.currentPositions.clear();
   }
 }

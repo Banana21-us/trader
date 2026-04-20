@@ -19,17 +19,16 @@
 
 import { TraderBot }       from "./trader.js";
 import { RiskEngine }      from "./utils/risk.js";
-import { TelegramAlerter } from "./utils/telegram.js";
 import { NewsFetcher }     from "./utils/news.js";
 import { BrokerExecutor }  from "./utils/broker.js";
 import { PositionMonitor } from "./utils/position_monitor.js";
 import { ChartCapture }    from "./utils/chart_capture.js";
+import { startDashboard }  from "./dashboard.js";
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
 
 const assets      = (process.env.WATCH_ASSETS || "XAUUSD").split(",").map((a) => a.trim());
 const minGrade    = process.env.MIN_GRADE    || "A";
-const autoExecute = process.env.AUTO_EXECUTE === "true";
 const usingMT5    = (process.env.BROKER || "paper").toLowerCase() === "mt";
 const maxDailyLoss = parseFloat(process.env.MAX_DAILY_LOSS_PCT || "3");
 const defaultBalance = parseFloat(process.env.BALANCE || "50");
@@ -52,13 +51,10 @@ const SESSIONS = [
 
 const bot          = new TraderBot();
 const risk         = new RiskEngine();
-const telegram     = new TelegramAlerter();
 const newsFetcher  = new NewsFetcher();
 const broker       = new BrokerExecutor();
 const chartCapture = new ChartCapture();
-const monitor      = new PositionMonitor({ bridgeUrl, bridgeSecret, telegram });
-
-// telegram.testConnection(); // disabled — silent auto-execute mode
+const monitor      = new PositionMonitor({ bridgeUrl, bridgeSecret });
 
 // ── LIVE BALANCE READER ───────────────────────────────────────────────────────
 
@@ -107,16 +103,6 @@ function fmtMs(ms) {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
-// ── EXECUTE CALLBACKS ─────────────────────────────────────────────────────────
-
-async function executeSignal(signal) {
-  return broker.execute(signal);
-}
-
-function skipSignal(signal) {
-  console.log(`[Watch] Skipped: ${signal.meta?.asset} ${signal.verdict}`);
-}
-
 // ── SCAN ONE ASSET ────────────────────────────────────────────────────────────
 
 async function scanAsset(asset, balance, sessionName) {
@@ -160,15 +146,11 @@ async function scanAsset(asset, balance, sessionName) {
     return null;
   }
 
-  if (autoExecute) {
-    const result = await broker.execute(signal);
-    if (result.success) {
-      console.log(`[Watch] ✅ Auto-executed — ${asset} ${signal.verdict} @ ${signal.entry} | Order: ${result.orderId} | Risk: $${signal.meta.riskAmount}`);
-    } else if (!result.skipped) {
-      console.log(`[Watch] ❌ Auto-execute failed: ${result.error}`);
-    }
-  } else {
-    await telegram.sendSignal(signal, { onExecute: executeSignal, onSkip: skipSignal });
+  const result = await broker.execute(signal);
+  if (result.success) {
+    console.log(`[Watch] ✅ Executed — ${asset} ${signal.verdict} @ ${signal.entry} | Order: ${result.orderId} | Risk: $${signal.meta.riskAmount}`);
+  } else if (!result.skipped) {
+    console.log(`[Watch] ❌ Execute failed: ${result.error}`);
   }
 
   return signal;
@@ -238,9 +220,8 @@ console.log(`
   Assets:      ${assets.join(", ")}
   Min grade:   ${minGrade} (A+ and A only → quality trades)
   Risk:        ${riskPct}% per trade
-  Execute:     ${autoExecute ? "AUTO (fires immediately)" : "MANUAL (Telegram YES/NO)"}
+  Execute:     AUTO (fires immediately)
   Broker:      ${process.env.BROKER || "paper"}
-  Telegram:    ${process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID ? "✓ enabled" : "✗ disabled"}
   Charts:      Auto-capture from TradingView
   Daily limit: Stop trading at -${maxDailyLoss}% drawdown
 `);
@@ -253,11 +234,11 @@ console.log(`
   Waiting for next session window...
 `);
 
-// Telegram button listener disabled — silent auto-execute mode
-// telegram.startCallbackListener();
-
 // Position monitor — every 60s, trails stops on open MT5 positions
 if (usingMT5) {
   console.log("[Monitor] Trailing stop monitor active (every 60s)\n");
   setInterval(() => monitor.tick(), 60_000);
 }
+
+// Dashboard — web GUI with live logs + manual scan buttons
+startDashboard({ assets, broker: process.env.BROKER || "paper", brokerExecutor: broker, scanAsset, getLiveBalance, bridgeUrl, bridgeSecret });

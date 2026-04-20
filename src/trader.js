@@ -70,6 +70,14 @@ export class TraderBot {
 
     const enriched = this.riskEngine.enrich(signal, params);
     this.logger.logSignal(enriched);
+    
+    // Add trade to history for drawdown tracking
+    if (enriched.meta && enriched.meta.isTradeworthy) {
+      // Note: In a real implementation, we would track the actual outcome
+      // This is a simplified version that adds to history for drawdown calculation
+      this.riskEngine.addTradeToHistory(enriched);
+    }
+    
     return enriched;
   }
 

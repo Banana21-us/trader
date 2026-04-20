@@ -27,7 +27,8 @@ export class TelegramAlerter {
     if (!this.enabled) {
       console.warn("[Telegram] Disabled — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.");
     } else {
-      this.sendText("✅ Trader bot connected! You will receive trade signals here.");
+      this.sendText("✅ Trader bot connected! You will receive trade signals here.")
+        .catch((err) => console.warn("[Telegram] Startup message failed:", err.message));
     }
   }
 
@@ -253,8 +254,8 @@ export class TelegramAlerter {
   // ─── HELPERS ─────────────────────────────────────────────────────────────
 
   async sendText(text) {
-    if (!this.enabled) return;
-    await this.request("sendMessage", {
+    if (!this.enabled) return null;
+    return this.request("sendMessage", {
       chat_id:    this.chatId,
       text,
       parse_mode: "Markdown",
@@ -262,15 +263,26 @@ export class TelegramAlerter {
   }
 
   async request(method, body = {}) {
-    const res = await fetch(`${this.baseUrl}/${method}`, {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (!data.ok) {
-      console.error(`[Telegram] ${method} failed:`, data.description);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const res = await fetch(`${this.baseUrl}/${method}`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify(body),
+        signal:  controller.signal,
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        console.error(`[Telegram] ${method} failed:`, data.description);
+      }
+      return data;
+    } catch (err) {
+      const reason = err.name === "AbortError" ? "request timed out" : err.message;
+      console.warn(`[Telegram] ${method} error: ${reason}`);
+      return null;
+    } finally {
+      clearTimeout(timer);
     }
-    return data;
   }
 }

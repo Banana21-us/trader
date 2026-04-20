@@ -205,6 +205,8 @@ class MTBridgeAdapter {
       tp,
       risk_amount: order.riskAmount,     // dollar amount to risk — bridge calculates lots
       comment:     `TraderBot ${order.grade} ${order.confidence}%`,
+      filling_mode: "IOC",           // Immediate or Cancel - more compatible with demo accounts
+      type:        "MARKET",          // Use market orders first, then modify with SL/TP
     };
 
     const res = await fetch(`${this.bridgeUrl}/execute`, {
