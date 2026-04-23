@@ -179,6 +179,33 @@ def positions():
     } for p in pos])
 
 
+@app.route("/history")
+def history():
+    """Recent closed deals — used for consecutive-loss kill switch + stats."""
+    err = check_auth()
+    if err: return err
+    if not ensure_connected():
+        return jsonify({"error": "MT5 not connected"}), 503
+
+    hours = int(request.args.get("hours", 168))  # default 7 days
+    from_ts = int(time.time()) - hours * 3600
+    deals = mt5.history_deals_get(datetime.fromtimestamp(from_ts), datetime.now())
+
+    if deals is None:
+        return jsonify([])
+
+    # Only closing deals that realized P&L (entry=OUT = closed position)
+    closed = [d for d in deals if d.entry == 1]  # DEAL_ENTRY_OUT
+    return jsonify([{
+        "ticket":  d.ticket,
+        "symbol":  d.symbol,
+        "profit":  d.profit,
+        "volume":  d.volume,
+        "time":    datetime.fromtimestamp(d.time).isoformat(),
+        "comment": d.comment,
+    } for d in sorted(closed, key=lambda x: x.time, reverse=True)])
+
+
 @app.route("/price/<symbol>")
 def price(symbol):
     err = check_auth()

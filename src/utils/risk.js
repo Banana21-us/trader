@@ -145,7 +145,31 @@ export class RiskEngine {
 
   isTradeworthy(signal) {
     const grade = this.gradeSignal(signal);
-    return ["A+", "A"].includes(grade) && signal.verdict !== "NEUTRAL";
+    if (!["A+", "A"].includes(grade))  return false;
+    if (signal.verdict === "NEUTRAL")  return false;
+
+    const entry = this.parsePrice(signal.entry);
+    const sl    = this.parsePrice(signal.stop_loss);
+    const tp    = this.parsePrice(signal.take_profit);
+
+    // Sanity guards — catches LLM hallucinations that the grade alone misses
+    if (!entry || !sl || !tp) return false;
+
+    // R:R to primary TP must be ≥ 1.8 (after spread/slippage, anything less is a coin flip)
+    const primaryRR = this.calcRR(entry, sl, tp);
+    if (!primaryRR || primaryRR < 1.8) return false;
+
+    // SL distance must be between 0.05% and 5% of price — catches obvious bad levels
+    const slDistPct = (Math.abs(entry - sl) / entry) * 100;
+    if (slDistPct < 0.05 || slDistPct > 5) return false;
+
+    // SL must be on the correct side of entry
+    if (signal.verdict === "BUY"  && sl >= entry) return false;
+    if (signal.verdict === "SELL" && sl <= entry) return false;
+    if (signal.verdict === "BUY"  && tp <= entry) return false;
+    if (signal.verdict === "SELL" && tp >= entry) return false;
+
+    return true;
   }
 
   formatReport(enriched) {

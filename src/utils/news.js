@@ -13,10 +13,73 @@ const ASSET_KEYWORDS = {
   SP500:   ["S&P 500", "SPX", "SPY", "equities", "stock market"],
 };
 
+// Currency codes each asset is sensitive to — used for event filtering
+const ASSET_CURRENCIES = {
+  XAUUSD:  ["USD"],
+  BTCUSDT: ["USD"],
+  EURUSD:  ["USD", "EUR"],
+  GBPUSD:  ["USD", "GBP"],
+  USDJPY:  ["USD", "JPY"],
+  USDCHF:  ["USD", "CHF"],
+  AUDUSD:  ["USD", "AUD"],
+  NASDAQ:  ["USD"],
+  SP500:   ["USD"],
+};
+
 export class NewsFetcher {
   constructor() {
     this.cache = new Map();
     this.cacheTtlMs = 15 * 60 * 1000; // 15 minutes
+    this.calendarCache = { data: null, ts: 0 };
+    this.calendarTtlMs = 60 * 60 * 1000; // 1 hour
+  }
+
+  /**
+   * Get high-impact economic events affecting this asset in the next `windowMinutes`.
+   * Uses ForexFactory's free weekly calendar JSON.
+   */
+  async getUpcomingHighImpact(asset, windowMinutes = 30) {
+    const events    = await this.fetchCalendar();
+    const currencies = ASSET_CURRENCIES[asset] || ["USD"];
+    const now       = Date.now();
+    const horizon   = now + windowMinutes * 60 * 1000;
+
+    return events
+      .filter((e) => e.impact === "High")
+      .filter((e) => currencies.includes(e.country))
+      .filter((e) => e.timestamp >= now && e.timestamp <= horizon)
+      .map((e) => ({
+        title:        e.title,
+        country:      e.country,
+        time:         new Date(e.timestamp).toISOString(),
+        minutesUntil: Math.round((e.timestamp - now) / 60_000),
+      }))
+      .sort((a, b) => a.minutesUntil - b.minutesUntil);
+  }
+
+  async fetchCalendar() {
+    if (this.calendarCache.data && Date.now() - this.calendarCache.ts < this.calendarTtlMs) {
+      return this.calendarCache.data;
+    }
+
+    try {
+      const res  = await fetch("https://nfs.faireconomy.media/ff_calendar_thisweek.json", {
+        headers: { "User-Agent": "TraderBot/1.0" },
+      });
+      const data = await res.json();
+
+      const events = (Array.isArray(data) ? data : []).map((e) => ({
+        title:     e.title,
+        country:   e.country,
+        impact:    e.impact,           // "High" | "Medium" | "Low" | "Holiday"
+        timestamp: new Date(e.date).getTime(),
+      })).filter((e) => !isNaN(e.timestamp));
+
+      this.calendarCache = { data: events, ts: Date.now() };
+      return events;
+    } catch {
+      return [];
+    }
   }
 
   async getSentiment(asset) {

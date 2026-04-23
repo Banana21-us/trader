@@ -23,6 +23,7 @@ import { NewsFetcher }     from "./utils/news.js";
 import { BrokerExecutor }  from "./utils/broker.js";
 import { PositionMonitor } from "./utils/position_monitor.js";
 import { ChartCapture }    from "./utils/chart_capture.js";
+import { TradeGuard }      from "./utils/trade_guard.js";
 import { startDashboard }  from "./dashboard.js";
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
@@ -55,6 +56,17 @@ const newsFetcher  = new NewsFetcher();
 const broker       = new BrokerExecutor();
 const chartCapture = new ChartCapture();
 const monitor      = new PositionMonitor({ bridgeUrl, bridgeSecret });
+const guard        = new TradeGuard({
+  bridgeUrl,
+  bridgeSecret,
+  newsFetcher,
+  config: {
+    maxConsecutiveLosses: parseInt(process.env.MAX_CONSECUTIVE_LOSSES || "3", 10),
+    lossCooldownHours:    parseFloat(process.env.LOSS_COOLDOWN_HOURS  || "6"),
+    newsBlackoutMinutes:  parseInt(process.env.NEWS_BLACKOUT_MINUTES  || "30", 10),
+    maxDailyLossPct:      maxDailyLoss,
+  },
+});
 
 // ── LIVE BALANCE READER ───────────────────────────────────────────────────────
 
@@ -144,6 +156,15 @@ async function scanAsset(asset, balance, sessionName) {
   if (!meetsThreshold(grade)) {
     console.log(`[Watch] ${asset} grade ${grade} — below threshold (${minGrade}), skipping.\n`);
     return null;
+  }
+
+  // Pre-trade safety checks
+  if (usingMT5) {
+    const check = await guard.check({ asset });
+    if (!check.allow) {
+      console.log(`[Watch] 🛑 Blocked: ${check.reason}`);
+      return signal;
+    }
   }
 
   const result = await broker.execute(signal);
@@ -241,4 +262,4 @@ if (usingMT5) {
 }
 
 // Dashboard — web GUI with live logs + manual scan buttons
-startDashboard({ assets, broker: process.env.BROKER || "paper", brokerExecutor: broker, scanAsset, getLiveBalance, bridgeUrl, bridgeSecret });
+startDashboard({ assets, broker: process.env.BROKER || "paper", brokerExecutor: broker, scanAsset, getLiveBalance, bridgeUrl, bridgeSecret, guard });

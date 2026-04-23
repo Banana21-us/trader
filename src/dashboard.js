@@ -194,6 +194,20 @@ function buildHtml(assets) {
       </div>
     </div>
 
+    <!-- Performance Stats -->
+    <div>
+      <div class="section-title">Performance (last 7 days)</div>
+      <div class="card">
+        <div class="stat"><span class="label">Total Trades</span><span class="value" id="st-total">—</span></div>
+        <div class="stat"><span class="label">Win Rate</span><span class="value" id="st-winrate">—</span></div>
+        <div class="stat"><span class="label">W / L</span><span class="value" id="st-wl">—</span></div>
+        <div class="stat"><span class="label">Avg Win</span><span class="value green" id="st-avgwin">—</span></div>
+        <div class="stat"><span class="label">Avg Loss</span><span class="value red" id="st-avgloss">—</span></div>
+        <div class="stat"><span class="label">Expectancy</span><span class="value" id="st-exp">—</span></div>
+        <div class="stat"><span class="label">Total P&L</span><span class="value" id="st-pnl">—</span></div>
+      </div>
+    </div>
+
   </div>
 
   <!-- LOG PANEL -->
@@ -414,6 +428,29 @@ function buildHtml(assets) {
   }
   setInterval(refreshStatus, 5000); refreshStatus();
 
+  // Stats panel
+  async function refreshStats() {
+    try {
+      const r = await fetch('/api/stats?hours=168');
+      const s = await r.json();
+      if (s.error) return;
+      document.getElementById('st-total').textContent   = s.totalTrades;
+      document.getElementById('st-winrate').textContent = s.winRate + '%';
+      document.getElementById('st-wl').textContent      = s.wins + ' / ' + s.losses;
+      document.getElementById('st-avgwin').textContent  = '$' + s.avgWin.toFixed(2);
+      document.getElementById('st-avgloss').textContent = '$' + s.avgLoss.toFixed(2);
+
+      const expEl = document.getElementById('st-exp');
+      expEl.textContent = (s.expectancy >= 0 ? '+' : '') + '$' + s.expectancy.toFixed(2);
+      expEl.className   = 'value ' + (s.expectancy > 0 ? 'green' : s.expectancy < 0 ? 'red' : '');
+
+      const pnlEl = document.getElementById('st-pnl');
+      pnlEl.textContent = (s.totalPnL >= 0 ? '+' : '') + '$' + s.totalPnL.toFixed(2);
+      pnlEl.className   = 'value ' + (s.totalPnL > 0 ? 'green' : s.totalPnL < 0 ? 'red' : '');
+    } catch {}
+  }
+  setInterval(refreshStats, 30000); refreshStats();
+
   function showToast(msg, isErr) {
     const t = document.getElementById('toast');
     t.textContent = msg;
@@ -428,7 +465,7 @@ function buildHtml(assets) {
 
 // ── HTTP server ───────────────────────────────────────────────────────────────
 
-export function startDashboard({ assets, broker, brokerExecutor, scanAsset, getLiveBalance, bridgeUrl, bridgeSecret }) {
+export function startDashboard({ assets, broker, brokerExecutor, scanAsset, getLiveBalance, bridgeUrl, bridgeSecret, guard }) {
 
   patchConsole();
 
@@ -465,6 +502,45 @@ export function startDashboard({ assets, broker, brokerExecutor, scanAsset, getL
       return;
     }
 
+    // Stats from MT5 history
+    if (url.pathname === "/api/stats" && req.method === "GET") {
+      const headers = { "Content-Type": "application/json", ...(bridgeSecret ? { "X-Secret": bridgeSecret } : {}) };
+      const hours = url.searchParams.get("hours") || "168";
+      try {
+        const r     = await fetch(`${bridgeUrl}/history?hours=${hours}`, { headers });
+        const deals = await r.json();
+        const list  = Array.isArray(deals) ? deals : [];
+
+        const wins   = list.filter((d) => d.profit > 0);
+        const losses = list.filter((d) => d.profit < 0);
+        const total  = list.reduce((s, d) => s + d.profit, 0);
+        const avgWin  = wins.length   ? wins.reduce((s, d) => s + d.profit, 0)   / wins.length   : 0;
+        const avgLoss = losses.length ? losses.reduce((s, d) => s + d.profit, 0) / losses.length : 0;
+        const winRate = list.length ? (wins.length / list.length) * 100 : 0;
+
+        // Expectancy = (winRate × avgWin) + (lossRate × avgLoss)
+        const lossRate   = 1 - (winRate / 100);
+        const expectancy = (winRate / 100) * avgWin + lossRate * avgLoss;
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          totalTrades: list.length,
+          wins:        wins.length,
+          losses:      losses.length,
+          winRate:     parseFloat(winRate.toFixed(1)),
+          totalPnL:    parseFloat(total.toFixed(2)),
+          avgWin:      parseFloat(avgWin.toFixed(2)),
+          avgLoss:     parseFloat(avgLoss.toFixed(2)),
+          expectancy:  parseFloat(expectancy.toFixed(2)),
+          hours:       parseInt(hours, 10),
+        }));
+      } catch {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Bridge not reachable" }));
+      }
+      return;
+    }
+
     // Live price proxy
     if (url.pathname.startsWith("/api/price/") && req.method === "GET") {
       const symbol = url.pathname.split("/api/price/")[1].toUpperCase();
@@ -493,6 +569,18 @@ export function startDashboard({ assets, broker, brokerExecutor, scanAsset, getL
       }
 
       console.log(`[Dashboard] Manual trade: ${side} ${asset} SL=${sl} TP=${tp} risk=$${risk || "auto"}`);
+
+      // Safety: still block duplicate positions and daily-loss limit on manual trades.
+      // Skip news/consecutive-loss checks — you're manually overriding those.
+      if (guard) {
+        const check = await guard.check({ asset, skipChecks: ["news", "losses"] });
+        if (!check.allow) {
+          console.log(`[Dashboard] 🛑 Manual trade blocked: ${check.reason}`);
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: false, error: check.reason }));
+          return;
+        }
+      }
 
       // Build a synthetic signal that bypasses AI — broker.execute() only needs these fields
       // Fetch live price so the log shows a real number
