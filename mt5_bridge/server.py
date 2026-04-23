@@ -206,6 +206,39 @@ def history():
     } for d in sorted(closed, key=lambda x: x.time, reverse=True)])
 
 
+@app.route("/candles/<symbol>")
+def candles(symbol):
+    """Historical OHLCV candles — used by the backtest harness."""
+    err = check_auth()
+    if err: return err
+    if not ensure_connected():
+        return jsonify({"error": "MT5 not connected"}), 503
+
+    tf_map = {
+        "M1":  mt5.TIMEFRAME_M1,  "M5":  mt5.TIMEFRAME_M5,
+        "M15": mt5.TIMEFRAME_M15, "M30": mt5.TIMEFRAME_M30,
+        "H1":  mt5.TIMEFRAME_H1,  "H4":  mt5.TIMEFRAME_H4,
+        "D1":  mt5.TIMEFRAME_D1,
+    }
+    tf_name = request.args.get("tf", "M15").upper()
+    count   = min(int(request.args.get("count", 500)), 5000)
+    tf      = tf_map.get(tf_name, mt5.TIMEFRAME_M15)
+    symbol  = symbol.replace("/", "").upper()
+
+    rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
+    if rates is None or len(rates) == 0:
+        return jsonify({"error": f"No candle data for {symbol} {tf_name}"}), 404
+
+    return jsonify([{
+        "t": int(r["time"]),
+        "o": float(r["open"]),
+        "h": float(r["high"]),
+        "l": float(r["low"]),
+        "c": float(r["close"]),
+        "v": int(r["tick_volume"]),
+    } for r in rates])
+
+
 @app.route("/price/<symbol>")
 def price(symbol):
     err = check_auth()

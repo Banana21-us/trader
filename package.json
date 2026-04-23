@@ -8,6 +8,7 @@
     "watch": "node --env-file=.env src/watch.js",
     "webhook": "node --env-file=.env src/webhook.js",
     "journal": "node --env-file=.env src/journal.js",
+    "backtest": "node --env-file=.env src/backtest.js",
     "setup": "npm install && npx playwright install chromium"
   },
   "dependencies": {
