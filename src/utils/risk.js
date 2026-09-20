@@ -1,9 +1,16 @@
 export class RiskEngine {
-  constructor() {
-    // Track trade history for drawdown calculation
-    this.tradeHistory = [];
-    // Track current position sizes for position limits
+  constructor({ roundTripBps } = {}) {
+    // Costs are certain; edge is hypothetical. Every R:R is charged for them.
+    this.roundTripBps = roundTripBps ?? (
+      2 * (parseFloat(process.env.TAKER_FEE_BPS || "10") +
+           parseFloat(process.env.SLIPPAGE_BPS  || "5")) +
+      parseFloat(process.env.SPREAD_BPS || "0")
+    );
     this.currentPositions = new Map();
+
+    // Notional caps as a fraction of equity.
+    this.maxTotalExposure = parseFloat(process.env.MAX_TOTAL_EXPOSURE || "0.30");
+    this.maxAssetExposure = parseFloat(process.env.MAX_ASSET_EXPOSURE || "0.10");
   }
 
   enrich(signal, { balance, riskPct, asset }) {
@@ -116,8 +123,10 @@ export class RiskEngine {
   }
 
   gradeSignal(signal) {
-    const conf     = signal.confidence || 0;
-    const rrNum    = this.parseRR(signal.rr_ratio);
+    const conf = signal.confidence || 0;
+    // R:R is computed from the levels, never read from signal.rr_ratio.
+    // Grading on a self-reported number rewards the model for inflating it.
+    const rrNum = this.computedRR(signal) ?? 0;
     const allAgree =
       signal.trend_vote     === signal.verdict &&
       signal.sr_vote        === signal.verdict &&
@@ -137,10 +146,25 @@ export class RiskEngine {
     return "skip";
   }
 
-  parseRR(rrStr) {
-    if (!rrStr) return 0;
-    const parts = String(rrStr).split(":");
-    return parts.length > 1 ? parseFloat(parts[1]) || 0 : 0;
+  /**
+   * R:R derived from the actual levels, measured to the primary target (TP2
+   * when present, else TP1). The model's own rr_ratio string is ignored.
+   */
+  computedRR(signal) {
+    const entry = this.parsePrice(signal.entry);
+    const sl    = this.parsePrice(signal.stop_loss);
+    const tp    = this.parsePrice(signal.tp2) || this.parsePrice(signal.take_profit);
+    return this.calcRR(entry, sl, tp);
+  }
+
+  /** Round-trip cost expressed in R, so it can be subtracted from R:R. */
+  costInR(signal) {
+    const entry = this.parsePrice(signal.entry);
+    const sl    = this.parsePrice(signal.stop_loss);
+    if (!entry || !sl) return Infinity;
+    const stopDist = Math.abs(entry - sl);
+    if (stopDist === 0) return Infinity;
+    return (entry * (this.roundTripBps / 10_000)) / stopDist;
   }
 
   isTradeworthy(signal) {
@@ -155,13 +179,20 @@ export class RiskEngine {
     // Sanity guards — catches LLM hallucinations that the grade alone misses
     if (!entry || !sl || !tp) return false;
 
-    // R:R to primary TP must be ≥ 1.8 (after spread/slippage, anything less is a coin flip)
-    const primaryRR = this.calcRR(entry, sl, tp);
-    if (!primaryRR || primaryRR < 1.8) return false;
+    // R:R must clear 1.8 AFTER paying the round trip, not before.
+    const grossRR = this.computedRR(signal) ?? this.calcRR(entry, sl, tp);
+    const costR   = this.costInR(signal);
+    if (!grossRR) return false;
+    if (grossRR - costR < 1.8) return false;
 
-    // SL distance must be between 0.05% and 5% of price — catches obvious bad levels
+    // Structural floor: the stop must sit at least 2x the round trip away.
+    // Closer than that and normal spread alone can take you out, independent
+    // of whether the thesis was right. The net-R:R test above handles the
+    // economics; this catches stops that are mechanically unsurvivable.
+    if (costR > 0.5) return false;
+
     const slDistPct = (Math.abs(entry - sl) / entry) * 100;
-    if (slDistPct < 0.05 || slDistPct > 5) return false;
+    if (slDistPct > 5) return false;
 
     // SL must be on the correct side of entry
     if (signal.verdict === "BUY"  && sl >= entry) return false;
@@ -244,54 +275,54 @@ ${"═".repeat(50)}
   /**
    * Apply position sizing limits based on asset and risk parameters
    */
+  /**
+   * Exposure caps measured in NOTIONAL (units x price), not in units and not
+   * in units-times-dollars-risked. The previous version multiplied position
+   * size by the risk amount, which is dimensionally meaningless: on a $500
+   * account it computed $50 of "exposure" for a position whose real notional
+   * was $23,000. The caps could never fire.
+   */
   applyPositionLimits(signal, positionSize, riskAmount, balance, asset) {
-    // If no position size can be calculated, return as is
     if (!positionSize) {
       return { adjustedPositionSize: positionSize, positionLimitReason: null };
     }
 
-    const adjustedPositionSize = parseFloat(positionSize);
-    
-    // Configuration for position limits
-    const maxPositionSize = 10000; // Maximum position size for any single asset
-    const maxTotalPosition = balance * 0.3; // Maximum total position value (30% of balance)
-    const maxAssetPosition = balance * 0.1; // Maximum position value per asset (10% of balance)
-    
-    let reason = null;
+    const size  = parseFloat(positionSize);
+    const price = this.parsePrice(signal.entry);
 
-    // Check if position size exceeds maximum
-    if (adjustedPositionSize > maxPositionSize) {
-      const ratio = maxPositionSize / adjustedPositionSize;
-      const newAdjustedSize = (adjustedPositionSize * ratio).toFixed(4);
-      reason = `Position size reduced from ${adjustedPositionSize} to ${newAdjustedSize} due to maximum limit of ${maxPositionSize}`;
-      return { adjustedPositionSize: newAdjustedSize, positionLimitReason: reason };
+    if (!price || !Number.isFinite(size)) {
+      return { adjustedPositionSize: positionSize, positionLimitReason: null };
     }
 
-    // Check if total position value exceeds 30% of balance
-    const totalPositionValue = adjustedPositionSize * riskAmount;
-    if (totalPositionValue > maxTotalPosition) {
-      const ratio = maxTotalPosition / totalPositionValue;
-      const newAdjustedSize = (adjustedPositionSize * ratio).toFixed(4);
-      reason = `Position size reduced from ${adjustedPositionSize} to ${newAdjustedSize} due to total position limit of 30% of balance`;
-      return { adjustedPositionSize: newAdjustedSize, positionLimitReason: reason };
-    }
+    const maxTotalNotional = balance * this.maxTotalExposure;
+    const maxAssetNotional = balance * this.maxAssetExposure;
 
-    // Check if position value for this asset exceeds 10% of balance
-    const currentAssetPositionValue = (this.currentPositions.get(asset) || 0) * riskAmount;
-    const newAssetPositionValue = currentAssetPositionValue + (adjustedPositionSize * riskAmount);
-    
-    if (newAssetPositionValue > maxAssetPosition) {
-      const ratio = maxAssetPosition / newAssetPositionValue;
-      const newAdjustedSize = (adjustedPositionSize * ratio).toFixed(4);
-      reason = `Position size reduced from ${adjustedPositionSize} to ${newAdjustedSize} due to asset position limit of 10% of balance`;
-      return { adjustedPositionSize: newAdjustedSize, positionLimitReason: reason };
-    }
+    const openNotional = (this.currentPositions.get(asset) || 0) * price;
+    const newNotional  = size * price;
 
-    // Update current positions tracking
-    const existingPosition = this.currentPositions.get(asset) || 0;
-    this.currentPositions.set(asset, existingPosition + adjustedPositionSize);
+    const cap = (limit, openPart, label) => {
+      const headroom = limit - openPart;
+      if (headroom <= 0) return { size: 0, reason: `${label} already at limit — no new exposure` };
+      if (newNotional <= headroom) return null;
+      const capped = parseFloat((headroom / price).toFixed(6));
+      return {
+        size: capped,
+        reason: `size cut ${size} -> ${capped} (${label}: $${newNotional.toFixed(0)} notional exceeds $${headroom.toFixed(0)} headroom)`,
+      };
+    };
 
-    return { adjustedPositionSize, positionLimitReason: reason };
+    const hit = cap(maxAssetNotional, openNotional, `per-asset ${(this.maxAssetExposure * 100).toFixed(0)}%`)
+             || cap(maxTotalNotional, this.totalOpenNotional(price), `portfolio ${(this.maxTotalExposure * 100).toFixed(0)}%`);
+
+    if (hit) return { adjustedPositionSize: hit.size, positionLimitReason: hit.reason };
+    return { adjustedPositionSize: size, positionLimitReason: null };
+  }
+
+  /** Sum of open exposure. Falls back to a single price when per-asset marks are absent. */
+  totalOpenNotional(price) {
+    let total = 0;
+    for (const units of this.currentPositions.values()) total += Math.abs(units) * price;
+    return total;
   }
 
   /**

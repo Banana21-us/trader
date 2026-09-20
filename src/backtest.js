@@ -19,6 +19,8 @@ import fs        from "fs";
 import path      from "path";
 import { buildTraderSystemPrompt } from "./prompts/system.js";
 import { RiskEngine }              from "./utils/risk.js";
+import { CostModel }               from "./core/costs.js";
+import { computeExpectancy, formatExpectancy } from "./core/expectancy.js";
 
 // ── CLI args ──────────────────────────────────────────────────────────────────
 
@@ -39,6 +41,15 @@ const GRADE_ORDER = ["A+", "A", "B", "C", "skip"];
 
 const client     = new Anthropic();
 const riskEngine = new RiskEngine();
+
+// Costs are charged on every simulated fill. A backtest without them
+// measures an edge that no broker will let you keep.
+const COSTS = new CostModel({
+  takerFeeBps: parseFloat(process.env.TAKER_FEE_BPS || "10"),
+  makerFeeBps: parseFloat(process.env.MAKER_FEE_BPS || "10"),
+  slippageBps: parseFloat(process.env.SLIPPAGE_BPS  || "5"),
+  spreadBps:   parseFloat(process.env.SPREAD_BPS    || "0"),
+});
 
 // ── Bridge helpers ────────────────────────────────────────────────────────────
 
@@ -248,7 +259,7 @@ function printReport(stats, trades, asset, days) {
 
   Avg Win       : $${sign(stats.avgWin)}
   Avg Loss      : $${sign(stats.avgLoss)}
-  Expectancy    : $${sign(stats.expectancy)} per trade  ${stats.expectancy > 0 ? "✅ POSITIVE EDGE" : "❌ NO EDGE"}
+  Expectancy    : ${sign(stats.expectancy)} per trade (net of fees + slippage)
 
   Total P&L     : $${sign(stats.totalPnL)}
   Final Balance : $${stats.finalBalance}
@@ -261,6 +272,14 @@ function printReport(stats, trades, asset, days) {
 
 ${"═".repeat(54)}
 `);
+
+  // The honest verdict: a positive total is not an edge until the
+  // confidence interval clears zero.
+  console.log("─── EDGE TEST ─────────────────────────────────────────");
+  console.log(formatExpectancy(computeExpectancy(trades)));
+  console.log(`  Round-trip cost charged: ${COSTS.roundTripBps().toFixed(1)}bps per trade`);
+  console.log("═".repeat(54));
+  console.log();
 
   // Show last 20 trades
   if (trades.length > 0) {
@@ -367,17 +386,25 @@ async function main() {
       continue;
     }
 
-    // Calculate dollar P&L based on actual R hit
-    const entry     = parsePrice(signal.entry);
-    const sl        = parsePrice(signal.stop_loss);
-    const tp        = parsePrice(signal.take_profit);
-    const riskPts   = Math.abs(entry - sl);
-    const rewardPts = Math.abs(tp - entry);
-    const actualPts = Math.abs(sim.exitPrice - entry);
-    const rrActual  = riskPts > 0 ? (actualPts / riskPts) : 0;
-    const pnl       = sim.outcome === "win"
-      ? riskAmt * (rewardPts / riskPts)
-      : -riskAmt;
+    // Net P&L from the ACTUAL exit price, with slippage on both fills and
+    // fees charged twice. The previous version paid full TP reward to any
+    // trade flagged a win, including ones that merely expired above entry.
+    const entry   = parsePrice(signal.entry);
+    const sl      = parsePrice(signal.stop_loss);
+    const tp      = parsePrice(signal.take_profit);
+    const riskPts = Math.abs(entry - sl);
+    const isBuy   = signal.verdict === "BUY";
+
+    const fillPx = COSTS.fillPrice(entry,         isBuy ? "BUY"  : "SELL");
+    const exitPx = COSTS.fillPrice(sim.exitPrice, isBuy ? "SELL" : "BUY");
+    const qty    = riskPts > 0 ? riskAmt / riskPts : 0;
+
+    const pnl      = COSTS.netPnl({ side: isBuy ? "BUY" : "SELL", entryPx: fillPx, exitPx, qty });
+    const rMultiple = riskAmt > 0 ? pnl / riskAmt : 0;
+    const rrActual  = Math.abs(rMultiple);
+
+    // Costs can flip a nominal TP touch into a net loser. Outcome follows money.
+    const netOutcome = pnl >= 0 ? "win" : "loss";
 
     trades.push({
       idx,
@@ -387,12 +414,14 @@ async function main() {
       entry,
       sl,
       tp,
-      outcome:    sim.outcome,
+      outcome:    netOutcome,
+      nominalOutcome: sim.outcome,
       bars:       sim.bars,
       expired:    sim.expired || false,
       exitPrice:  sim.exitPrice,
       pnl:        parseFloat(pnl.toFixed(2)),
       rrActual:   parseFloat(rrActual.toFixed(2)),
+      r_multiple: parseFloat(rMultiple.toFixed(3)),
       confidence: signal.confidence || 0,
     });
 
